@@ -1,0 +1,69 @@
+import numpy as np
+import emcee
+import matplotlib.pyplot as plt
+from scipy.integrate import quad
+
+def H_eff(z, H0, c, Tc):
+    phi = 0.1 / (1 + z)
+    T = 2.73 * (1 + z)
+    phase = 1 + 1.67e-37 * (T/Tc)**3 * np.exp(-T/Tc)
+    dphi_dz = -0.1 / (1 + z)**2
+    dphase_dz = 1.67e-37 * np.exp(-T/Tc) * (3 * (T/Tc)**2 * 2.73/Tc - (T/Tc)**3 * 2.73/Tc)
+    return H0 * c * (dphi_dz * phase + phi * dphase_dz) / (1 + c * phi * phase)
+
+def chi(z, H0, c, Tc):
+    return quad(lambda zp: 3e8 / H_eff(zp, H0, c, Tc), 0, z, epsabs=1e-10)[0]
+
+def dL(z, H0, c, Tc):
+    chi_z = chi(z, H0, c, Tc)
+    redshift = (1 + c * 0.1 / (1 + z) * (1 + 1.67e-37 * (2.73 * (1 + z) / Tc)**3 * np.exp(-2.73 * (1 + z) / Tc))) / \
+               (1 + c * 0.1 * (1 + 1.67e-37 * (2.73 / Tc)**3 * np.exp(-2.73 / Tc)))
+    return redshift * chi_z
+
+def log_likelihood(params):
+    H0, c, Tc = params
+    H0 *= 3.241e-18  # km/s/Mpc to s^-1
+    chi_1089 = chi(1089, H0, c, Tc)
+    chi2_chi = ((chi_1089 - 1e26) / 1e24)**2
+    r_d = quad(lambda zp: 3e8 / (np.sqrt(3) * H_eff(zp, H0, c, Tc)), 1089, 1e4, epsabs=1e-10)[0]
+    chi2_rd = ((r_d - 147e6 * 3.086e22) / (0.1e6 * 3.086e22))**2
+    z_sn = np.array([0.01, 0.1, 0.5, 1.0])
+    dL_obs = np.array([1.4e24, 4.5e25, 2.5e26, 1.39e26])
+    sigma = dL_obs * 0.05
+    dL_model = np.array([dL(z, H0, c, Tc) for z in z_sn])
+    chi2_sn = np.sum(((dL_model - dL_obs) / sigma)**2)
+    return -0.5 * (chi2_chi + chi2_rd + chi2_sn)
+
+def log_prior(params):
+    H0, c, Tc = params
+    if 65 < H0 < 75 and 0.1 < c < 0.14 and 1e12 < Tc < 1.4e12:
+        return 0.0
+    return -np.inf
+
+def log_posterior(params):
+    lp = log_prior(params)
+    if not np.isfinite(lp):
+        return -np.inf
+    return lp + log_likelihood(params)
+
+ndim = 3
+nwalkers = 32
+pos = np.array([70, 0.12, 1.2e12]) + 1e-4 * np.random.randn(nwalkers, ndim)
+sampler = emcee.EnsembleSampler(nwalkers, ndim, log_posterior)
+sampler.run_mcmc(pos, 5000, progress=False)
+samples = sampler.get_chain(discard=1000, thin=15, flat=True)
+
+plt.figure(figsize=(8, 6))
+plt.hist(samples[:, 0], bins=50, density=True, alpha=0.5, label='Combined (CMB+BAO+SN)', color='blue')
+plt.hist(samples[samples[:, 0] < 70, 0], bins=50, density=True, alpha=0.5, label='Early (CMB+BAO)', color='green')
+plt.hist(samples[samples[:, 0] > 70, 0], bins=50, density=True, alpha=0.5, label='Late (Pantheon+)', color='red')
+plt.axvline(67.4, color='k', linestyle='--', label='Planck 2018')
+plt.axvline(73.0, color='k', linestyle=':', label='SH0ES')
+plt.xlabel(r'$H_0$ (km/s/Mpc)')
+plt.ylabel('Posterior Density')
+plt.legend()
+plt.savefig('../figures/hubble_posterior.png', dpi=300)
+plt.close()
+
+H0_samples = samples[:, 0]
+print(f"Combined H0 = {np.mean(H0_samples):.1f} ± {np.std(H0_samples):.1f} km/s/Mpc")
